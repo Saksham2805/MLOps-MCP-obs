@@ -170,20 +170,23 @@ llm-obs-mcp/
 
 ## Getting Started
 
-> **Prerequisites:** Kubernetes cluster with vLLM pods, NVIDIA DCGM Exporter as DaemonSet, TimescaleDB accessible.
-
 ```bash
-git clone https://github.com/<your-handle>/llm-obs-mcp
-cd llm-obs-mcp
-pip install -r requirements.txt
-psql $TIMESCALEDB_URL -f collector/schema.sql
+git clone https://github.com/Saksham2805/MLOps-MCP-obs.git
+cd MLOps-MCP-obs
+
+# 1. Fill in your vLLM endpoints
 cp collector/config.yaml.example collector/config.yaml
-# Edit config.yaml: add your vLLM pod endpoints and model names
-python collector/scraper.py     # start metrics collector
-python mcp_server/server.py     # start MCP server
+
+# 2. Fill in your credentials
+cp deploy/secrets.yaml.example deploy/secrets.yaml
+
+# 3. Build images, update manifest image names, then:
+cd deploy && ./deploy.sh
 ```
 
-Full K8s deployment guide with env vars and DCGM setup: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+**Full step-by-step deployment guide:** [`DEPLOYMENT.md`](DEPLOYMENT.md)
+
+Covers: vLLM endpoint discovery, base64 credential encoding, Docker build + push, `deploy.sh` walkthrough, service access, and troubleshooting.
 
 ---
 
@@ -195,7 +198,7 @@ Full K8s deployment guide with env vars and DCGM setup: [`docs/ARCHITECTURE.md`]
 
 ## Status
 
-**In Design** - Architecture and documentation complete. Implementation begins Phase 1.
+**Complete** — All code, manifests, and documentation written. Deploy with `cd deploy && ./deploy.sh`.
 
 ---
 
