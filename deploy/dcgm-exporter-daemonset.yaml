@@ -1,0 +1,117 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# DCGM Exporter DaemonSet + Service
+# Exposes GPU metrics from nvidia/dcgm-exporter on every GPU node
+# ──────────────────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: dcgm-exporter
+  namespace: llm-obs
+  labels:
+    app: dcgm-exporter
+    app.kubernetes.io/component: gpu-metrics
+    app.kubernetes.io/part-of: llm-obs
+spec:
+  selector:
+    matchLabels:
+      app: dcgm-exporter
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app: dcgm-exporter
+        app.kubernetes.io/component: gpu-metrics
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9400"
+        prometheus.io/path: "/metrics"
+    spec:
+      nodeSelector:
+        nvidia.com/gpu: "present"
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      priorityClassName: system-node-critical
+      containers:
+        - name: dcgm-exporter
+          image: nvidia/dcgm-exporter:3.3.5-3.4.0-ubuntu22.04
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+            runAsNonRoot: false
+          ports:
+            - name: metrics
+              containerPort: 9400
+              protocol: TCP
+          env:
+            - name: DCGM_EXPORTER_LISTEN
+              value: ":9400"
+            - name: DCGM_EXPORTER_KUBERNETES
+              value: "true"
+            - name: DCGM_EXPORTER_COLLECTORS
+              value: /etc/dcgm-exporter/default-counters.csv
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 9400
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9400
+            initialDelaySeconds: 15
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: pod-resources
+              mountPath: /var/lib/kubelet/pod-resources
+              readOnly: true
+            - name: device-dir
+              mountPath: /dev
+              readOnly: true
+      volumes:
+        - name: pod-resources
+          hostPath:
+            path: /var/lib/kubelet/pod-resources
+            type: Directory
+        - name: device-dir
+          hostPath:
+            path: /dev
+            type: Directory
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dcgm-exporter
+  namespace: llm-obs
+  labels:
+    app: dcgm-exporter
+    app.kubernetes.io/component: gpu-metrics
+    app.kubernetes.io/part-of: llm-obs
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9400"
+spec:
+  type: ClusterIP
+  selector:
+    app: dcgm-exporter
+  ports:
+    - name: metrics
+      port: 9400
+      targetPort: 9400
+      protocol: TCP

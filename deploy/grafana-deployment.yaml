@@ -1,0 +1,187 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Grafana Deployment, PVC, Service, and datasource ConfigMap
+# Access Grafana at NodePort 30300
+# ──────────────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  namespace: llm-obs
+  labels:
+    app: grafana
+    app.kubernetes.io/component: visualization
+data:
+  datasources.yaml: |-
+    apiVersion: 1
+    datasources:
+      - name: TimescaleDB
+        type: postgres
+        uid: timescaledb-uid
+        url: timescaledb-svc.llm-obs.svc.cluster.local:5432
+        database: llm_obs
+        user: $__env{GF_DS_TIMESCALEDB_USER}
+        secureJsonData:
+          password: $__env{GF_DS_TIMESCALEDB_PASSWORD}
+        jsonData:
+          sslmode: disable
+          postgresVersion: 1500
+          timescaledb: true
+          maxOpenConns: 10
+          maxIdleConns: 2
+          connMaxLifetime: 14400
+        isDefault: true
+        editable: true
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-ini
+  namespace: llm-obs
+  labels:
+    app: grafana
+data:
+  grafana.ini: |-
+    [server]
+    http_port = 3000
+    root_url = %(protocol)s://%(domain)s:%(http_port)s/
+
+    [auth.anonymous]
+    enabled = false
+
+    [security]
+    admin_user = admin
+    admin_password = ${GF_SECURITY_ADMIN_PASSWORD}
+
+    [dashboards]
+    default_home_dashboard_path = /var/lib/grafana/dashboards/llm-observability.json
+
+    [log]
+    mode = console
+    level = info
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: grafana-pvc
+  namespace: llm-obs
+  labels:
+    app: grafana
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: llm-obs
+  labels:
+    app: grafana
+    app.kubernetes.io/component: visualization
+    app.kubernetes.io/part-of: llm-obs
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: grafana
+        app.kubernetes.io/component: visualization
+    spec:
+      securityContext:
+        fsGroup: 472
+        runAsUser: 472
+        runAsGroup: 472
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: grafana
+          image: grafana/grafana:10.4.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          env:
+            - name: GF_SECURITY_ADMIN_USER
+              value: admin
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              value: changeme123
+            - name: GF_INSTALL_PLUGINS
+              value: ""
+            - name: GF_DS_TIMESCALEDB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: llm-obs-secrets
+                  key: POSTGRES_USER
+            - name: GF_DS_TIMESCALEDB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: llm-obs-secrets
+                  key: POSTGRES_PASSWORD
+            - name: GF_PATHS_PROVISIONING
+              value: /etc/grafana/provisioning
+            - name: GF_PATHS_DATA
+              value: /var/lib/grafana
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          volumeMounts:
+            - name: grafana-storage
+              mountPath: /var/lib/grafana
+            - name: datasources
+              mountPath: /etc/grafana/provisioning/datasources
+              readOnly: true
+      volumes:
+        - name: grafana-storage
+          persistentVolumeClaim:
+            claimName: grafana-pvc
+        - name: datasources
+          configMap:
+            name: grafana-datasources
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana-svc
+  namespace: llm-obs
+  labels:
+    app: grafana
+    app.kubernetes.io/component: visualization
+    app.kubernetes.io/part-of: llm-obs
+spec:
+  type: NodePort
+  selector:
+    app: grafana
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+      nodePort: 30300
+      protocol: TCP

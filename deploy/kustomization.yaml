@@ -1,0 +1,25 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: llm-obs
+
+resources:
+  # 1. Namespace must come first
+  - namespace.yaml
+  # 2. Secrets and ConfigMaps (no dependencies)
+  - configmap.yaml
+  # 3. Storage layer
+  - timescaledb-statefulset.yaml
+  # 4. GPU metrics
+  - dcgm-exporter-daemonset.yaml
+  # 5. Application workloads
+  - collector-deployment.yaml
+  - mcp-server-deployment.yaml
+  # 6. Visualization
+  - grafana-deployment.yaml
+
+# NOTE: secrets.yaml.example is excluded intentionally - copy and rename
+# to secrets.yaml with real base64 values before applying:
+#   cp secrets.yaml.example secrets.yaml
+#   # Edit secrets.yaml with real credentials
+#   kubectl apply -f secrets.yaml

@@ -1,0 +1,169 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# TimescaleDB StatefulSet, headless Service, and ClusterIP Service
+# Namespace: llm-obs
+# ──────────────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: timescaledb-headless
+  namespace: llm-obs
+  labels:
+    app: timescaledb
+    app.kubernetes.io/component: database
+spec:
+  clusterIP: None
+  selector:
+    app: timescaledb
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+      protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: timescaledb-svc
+  namespace: llm-obs
+  labels:
+    app: timescaledb
+    app.kubernetes.io/component: database
+spec:
+  type: ClusterIP
+  selector:
+    app: timescaledb
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: timescaledb
+  namespace: llm-obs
+  labels:
+    app: timescaledb
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: llm-obs
+spec:
+  serviceName: timescaledb-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app: timescaledb
+  template:
+    metadata:
+      labels:
+        app: timescaledb
+        app.kubernetes.io/component: database
+    spec:
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        fsGroup: 999
+      initContainers:
+        - name: schema-init
+          image: timescale/timescaledb:latest-pg15
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Waiting for TimescaleDB to be ready..."
+              until pg_isready -h 127.0.0.1 -p 5432 -U "${POSTGRES_USER}"; do
+                sleep 2
+              done
+              echo "Applying schema..."
+              psql "${TIMESCALEDB_URL}" -f /etc/schema/schema.sql
+              echo "Schema applied successfully."
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: llm-obs-secrets
+                  key: POSTGRES_USER
+            - name: TIMESCALEDB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: llm-obs-secrets
+                  key: TIMESCALEDB_URL
+          volumeMounts:
+            - name: schema-volume
+              mountPath: /etc/schema
+      containers:
+        - name: timescaledb
+          image: timescale/timescaledb:latest-pg15
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: postgres
+              containerPort: 5432
+              protocol: TCP
+          env:
+            - name: POSTGRES_DB
+              value: "llm_obs"
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: llm-obs-secrets
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: llm-obs-secrets
+                  key: POSTGRES_PASSWORD
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2000m"
+              memory: "4Gi"
+          livenessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - $(POSTGRES_USER)
+                - -d
+                - llm_obs
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - $(POSTGRES_USER)
+                - -d
+                - llm_obs
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: timescaledb-data
+              mountPath: /var/lib/postgresql/data
+            - name: schema-volume
+              mountPath: /etc/schema
+      volumes:
+        - name: schema-volume
+          configMap:
+            name: llm-obs-config
+            items:
+              - key: schema.sql
+                path: schema.sql
+  volumeClaimTemplates:
+    - metadata:
+        name: timescaledb-data
+        labels:
+          app: timescaledb
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 50Gi

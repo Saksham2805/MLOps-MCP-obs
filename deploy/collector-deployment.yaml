@@ -1,0 +1,104 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Collector Deployment
+# Image: <YOUR_REGISTRY>/llm-obs-collector:latest
+# ──────────────────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-obs-collector
+  namespace: llm-obs
+  labels:
+    app: llm-obs-collector
+    app.kubernetes.io/component: collector
+    app.kubernetes.io/part-of: llm-obs
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: llm-obs-collector
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: llm-obs-collector
+        app.kubernetes.io/component: collector
+    spec:
+      restartPolicy: Always
+      serviceAccountName: llm-obs-collector
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: collector
+          image: <YOUR_REGISTRY>/llm-obs-collector:latest
+          imagePullPolicy: Always
+          env:
+            - name: CONFIG_PATH
+              value: /etc/llm-obs/config.yaml
+            - name: TIMESCALEDB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: llm-obs-secrets
+                  key: TIMESCALEDB_URL
+            - name: ALERTMANAGER_URL
+              valueFrom:
+                secretKeyRef:
+                  name: llm-obs-secrets
+                  key: ALERTMANAGER_URL
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          volumeMounts:
+            - name: config-volume
+              mountPath: /etc/llm-obs
+              readOnly: true
+      volumes:
+        - name: config-volume
+          configMap:
+            name: llm-obs-config
+            items:
+              - key: config.yaml
+                path: config.yaml
+---
+# ServiceAccount so the collector can call the K8s metrics API
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: llm-obs-collector
+  namespace: llm-obs
+  labels:
+    app: llm-obs-collector
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: llm-obs-collector
+  labels:
+    app: llm-obs-collector
+rules:
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: llm-obs-collector
+  labels:
+    app: llm-obs-collector
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: llm-obs-collector
+subjects:
+  - kind: ServiceAccount
+    name: llm-obs-collector
+    namespace: llm-obs

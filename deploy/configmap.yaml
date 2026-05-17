@@ -1,0 +1,189 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llm-obs-config
+  namespace: llm-obs
+  labels:
+    app.kubernetes.io/component: config
+    app.kubernetes.io/part-of: llm-obs
+data:
+  config.yaml: |-
+    models:
+      - name: gpt-oss-20b
+        vllm_endpoint: http://gpt-oss-svc.inference.svc.cluster.local:8000/metrics
+        model_type: llm
+        gpu_node_selector: gpu-node-1
+        tts_tokens_per_second_of_audio: null  # only for TTS
+      - name: gemma4
+        vllm_endpoint: http://gemma4-svc.inference.svc.cluster.local:8000/metrics
+        model_type: llm
+        gpu_node_selector: gpu-node-2
+        tts_tokens_per_second_of_audio: null
+      - name: svara-tts
+        vllm_endpoint: http://svara-svc.inference.svc.cluster.local:8000/metrics
+        model_type: tts
+        gpu_node_selector: gpu-node-3
+        tts_tokens_per_second_of_audio: 86.0  # model-specific: tokens that equal 1 second of audio
+
+    collector:
+      scrape_interval_seconds: 15
+      timescaledb_url: postgresql://obs_user:obs_pass@timescaledb-svc.llm-obs.svc.cluster.local:5432/llm_obs
+      dcgm_endpoint: http://dcgm-exporter.monitoring.svc.cluster.local:9400/metrics
+      k8s_namespace: inference
+      alertmanager_url: http://alertmanager.monitoring.svc.cluster.local:9093
+
+    analytics:
+      anomaly_score_warning: -0.05
+      anomaly_score_critical: -0.15
+      kv_cache_warning_pct: 75.0
+      kv_cache_critical_pct: 90.0
+      requests_waiting_warning: 5
+      requests_waiting_critical: 20
+      gpu_mem_free_warning_mb: 4096
+      gpu_mem_free_critical_mb: 2048
+      gpu_temp_warning_celsius: 80.0
+      gpu_temp_critical_celsius: 87.0
+      rtf_warning: 0.8
+      rtf_critical: 1.0
+      drift_check_interval_minutes: 5
+      anomaly_score_interval_seconds: 60
+      forecast_interval_minutes: 30
+      anomaly_retrain_hour_utc: 2
+
+  schema.sql: |-
+    -- llm-obs-mcp  TimescaleDB Schema
+    -- Run once against your TimescaleDB instance:
+    --   psql $TIMESCALEDB_URL -f collector/schema.sql
+
+    -- ── Extension ──────────────────────────────────────────────────────────────
+    CREATE EXTENSION IF NOT EXISTS timescaledb;
+
+    -- ── 1. inference_metrics ───────────────────────────────────────────────────
+    -- One row per (model, scrape tick). Written every 15 s by the collector.
+    CREATE TABLE IF NOT EXISTS inference_metrics (
+        time                    TIMESTAMPTZ     NOT NULL,
+        model_name              TEXT            NOT NULL,
+        model_type              TEXT            NOT NULL DEFAULT 'llm',  -- 'llm' | 'tts'
+        -- vLLM latency (histogram quantiles, converted to ms)
+        latency_p50_ms          DOUBLE PRECISION,
+        latency_p95_ms          DOUBLE PRECISION,
+        latency_p99_ms          DOUBLE PRECISION,
+        -- Time To First Token
+        ttft_p50_ms             DOUBLE PRECISION,
+        ttft_p95_ms             DOUBLE PRECISION,
+        -- Time Per Output Token
+        tpot_ms                 DOUBLE PRECISION,
+        -- Throughput (derived: delta requests / interval)
+        throughput_rps          DOUBLE PRECISION,
+        -- Raw cumulative counters (for delta computation)
+        prompt_tokens_total     BIGINT,
+        completion_tokens_total BIGINT,
+        request_success_total   BIGINT,
+        -- Concurrency
+        requests_running        INTEGER,
+        requests_waiting        INTEGER,
+        -- KV cache (0-100 %)
+        kv_cache_usage_pct      DOUBLE PRECISION,
+        -- GPU metrics (from DCGM)
+        gpu_util_pct            DOUBLE PRECISION,
+        gpu_mem_used_mb         DOUBLE PRECISION,
+        gpu_mem_free_mb         DOUBLE PRECISION,
+        gpu_temp_celsius        DOUBLE PRECISION,
+        gpu_power_watts         DOUBLE PRECISION,
+        -- K8s pod metrics
+        pod_cpu_millicores      INTEGER,
+        pod_mem_mb              DOUBLE PRECISION,
+        -- TTS only: Real-Time Factor  (<1 = faster than real-time)
+        rtf                     DOUBLE PRECISION
+    );
+    SELECT create_hypertable('inference_metrics', 'time', if_not_exists => TRUE);
+    CREATE INDEX IF NOT EXISTS idx_im_model_time
+        ON inference_metrics (model_name, time DESC);
+    -- Auto-drop rows older than 90 days
+    SELECT add_retention_policy('inference_metrics',
+        INTERVAL '90 days', if_not_exists => TRUE);
+
+    -- ── 2. anomaly_events ──────────────────────────────────────────────────────
+    -- Written every 60 s by analytics/anomaly.py.
+    CREATE TABLE IF NOT EXISTS anomaly_events (
+        time                    TIMESTAMPTZ     NOT NULL,
+        model_name              TEXT            NOT NULL,
+        anomaly_score           DOUBLE PRECISION NOT NULL,  -- decision_function output
+        is_anomaly              BOOLEAN         NOT NULL,
+        cold_start_mode         BOOLEAN         NOT NULL DEFAULT FALSE,
+        -- JSON array of {metric, current_value, baseline_mean, deviation_pct}
+        contributing_dims       JSONB,
+        -- Optional: threshold or drift alerts written by alert webhook
+        alert_type              TEXT,           -- 'anomaly' | 'threshold' | 'drift'
+        severity                TEXT,           -- 'warning' | 'critical'
+        title                   TEXT,
+        description             TEXT,
+        resolved_at             TIMESTAMPTZ
+    );
+    SELECT create_hypertable('anomaly_events', 'time', if_not_exists => TRUE);
+    CREATE INDEX IF NOT EXISTS idx_ae_model_time
+        ON anomaly_events (model_name, time DESC);
+    SELECT add_retention_policy('anomaly_events',
+        INTERVAL '90 days', if_not_exists => TRUE);
+
+    -- ── 3. drift_scores ────────────────────────────────────────────────────────
+    -- Written every 5 min by analytics/drift.py.
+    CREATE TABLE IF NOT EXISTS drift_scores (
+        time                    TIMESTAMPTZ     NOT NULL,
+        model_name              TEXT            NOT NULL,
+        metric                  TEXT            NOT NULL,  -- 'prompt_tokens' | 'latency' | etc.
+        reference_window        TEXT            NOT NULL,  -- '7d' | '14d' | '30d'
+        comparison_window       TEXT            NOT NULL,  -- '1h' | '6h' | '24h'
+        ks_statistic            DOUBLE PRECISION,
+        ks_p_value              DOUBLE PRECISION,
+        psi_score               DOUBLE PRECISION,
+        drift_detected          BOOLEAN,
+        severity                TEXT,           -- 'none' | 'low' | 'medium' | 'high'
+        reference_mean          DOUBLE PRECISION,
+        comparison_mean         DOUBLE PRECISION,
+        reference_p95           DOUBLE PRECISION,
+        comparison_p95          DOUBLE PRECISION
+    );
+    SELECT create_hypertable('drift_scores', 'time', if_not_exists => TRUE);
+    CREATE INDEX IF NOT EXISTS idx_ds_model_metric_time
+        ON drift_scores (model_name, metric, time DESC);
+    SELECT add_retention_policy('drift_scores',
+        INTERVAL '90 days', if_not_exists => TRUE);
+
+    -- ── 4. forecast_snapshots ──────────────────────────────────────────────────
+    -- Written every 30 min by analytics/forecaster.py.
+    CREATE TABLE IF NOT EXISTS forecast_snapshots (
+        time                    TIMESTAMPTZ     NOT NULL,  -- when forecast was generated
+        model_name              TEXT            NOT NULL,
+        metric                  TEXT            NOT NULL,
+        horizon_hours           INTEGER         NOT NULL,
+        current_value           DOUBLE PRECISION,
+        saturation_threshold    DOUBLE PRECISION,
+        saturation_risk         TEXT,           -- 'low' | 'medium' | 'high'
+        predicted_saturation_at TIMESTAMPTZ,
+        -- JSON array of {timestamp, yhat, yhat_lower, yhat_upper}
+        forecast_points         JSONB           NOT NULL,
+        cold_start_mode         BOOLEAN         NOT NULL DEFAULT FALSE
+    );
+    SELECT create_hypertable('forecast_snapshots', 'time', if_not_exists => TRUE);
+    CREATE INDEX IF NOT EXISTS idx_fs_model_metric_time
+        ON forecast_snapshots (model_name, metric, time DESC);
+    SELECT add_retention_policy('forecast_snapshots',
+        INTERVAL '30 days', if_not_exists => TRUE);
+
+    -- ── 5. model_artifacts ─────────────────────────────────────────────────────
+    -- Stores serialised joblib blobs for IsolationForest models.
+    CREATE TABLE IF NOT EXISTS model_artifacts (
+        id                      SERIAL          PRIMARY KEY,
+        model_name              TEXT            NOT NULL,
+        artifact_type           TEXT            NOT NULL DEFAULT 'isolation_forest',
+        trained_at              TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
+        scaler_blob             BYTEA,          -- StandardScaler
+        model_blob              BYTEA           NOT NULL,
+        feature_names           TEXT[],
+        baseline_means          JSONB,
+        n_training_samples      INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_ma_model_trained
+        ON model_artifacts (model_name, trained_at DESC);
+
