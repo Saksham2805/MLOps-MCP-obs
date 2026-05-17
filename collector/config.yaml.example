@@ -1,0 +1,41 @@
+models:
+  - name: gpt-oss-20b
+    vllm_endpoint: http://gpt-oss-svc.inference.svc.cluster.local:8000/metrics
+    model_type: llm
+    gpu_node_selector: gpu-node-1
+    tts_tokens_per_second_of_audio: null  # only for TTS
+  - name: gemma4
+    vllm_endpoint: http://gemma4-svc.inference.svc.cluster.local:8000/metrics
+    model_type: llm
+    gpu_node_selector: gpu-node-2
+    tts_tokens_per_second_of_audio: null
+  - name: svara-tts
+    vllm_endpoint: http://svara-svc.inference.svc.cluster.local:8000/metrics
+    model_type: tts
+    gpu_node_selector: gpu-node-3
+    tts_tokens_per_second_of_audio: 86.0  # model-specific: tokens that equal 1 second of audio
+
+collector:
+  scrape_interval_seconds: 15
+  timescaledb_url: postgresql://obs_user:obs_pass@timescaledb-svc.llm-obs.svc.cluster.local:5432/llm_obs
+  dcgm_endpoint: http://dcgm-exporter.monitoring.svc.cluster.local:9400/metrics
+  k8s_namespace: inference
+  alertmanager_url: http://alertmanager.monitoring.svc.cluster.local:9093
+
+analytics:
+  anomaly_score_warning: -0.05
+  anomaly_score_critical: -0.15
+  kv_cache_warning_pct: 75.0
+  kv_cache_critical_pct: 90.0
+  requests_waiting_warning: 5
+  requests_waiting_critical: 20
+  gpu_mem_free_warning_mb: 4096
+  gpu_mem_free_critical_mb: 2048
+  gpu_temp_warning_celsius: 80.0
+  gpu_temp_critical_celsius: 87.0
+  rtf_warning: 0.8
+  rtf_critical: 1.0
+  drift_check_interval_minutes: 5
+  anomaly_score_interval_seconds: 60
+  forecast_interval_minutes: 30
+  anomaly_retrain_hour_utc: 2
